@@ -1,0 +1,213 @@
+/*
+ * Project myProject
+ * Author: Your Name
+ * Date:
+ * For comprehensive documentation and examples, please visit:
+ * https://docs.particle.io/firmware/best-practices/firmware-template/
+ */
+
+// Include Particle Device OS APIs
+#include "Particle.h"
+#include "neopixel.h"
+
+// Let Device OS manage the connection to the Particle Cloud
+SYSTEM_MODE(AUTOMATIC);
+
+// Run the application and system concurrently in separate threads
+SYSTEM_THREAD(ENABLED);
+
+// Show system, cloud connectivity, and application logs over USB
+// View logs with CLI using 'particle serial monitor --follow'
+SerialLogHandler logHandler(LOG_LEVEL_INFO);
+
+#define EZAnalogLeft A0
+#define EZAnalogRight A1
+#define EZPWM A2
+uint8_t sampleSize = 9;
+int led_on = 0;
+unsigned int radarSamplesLeft[] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+// unsigned int radarSamplesRight[] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+void isort(unsigned int *a, int8_t n);
+#define num_avg_sample 3
+unsigned int readings[num_avg_sample];
+int count = 0;
+unsigned int mode(unsigned int *x, int n);
+
+#define parking_threshold 30
+
+// Neopixel Config
+#define N_LED 1
+#define PIN_Pixel SPI1
+#define Pixel_Type WS2812
+Adafruit_NeoPixel ring(N_LED, PIN_Pixel, Pixel_Type);
+
+void setup()
+{
+  pinMode(EZAnalogLeft, INPUT);
+  pinMode(EZPWM, INPUT);
+  // pinMode(EZAnalogRight, INPUT);
+  pinMode(D1, OUTPUT);
+
+  ring.begin();
+
+  // for (int i = 0; i < N_LED; i++)
+  // {
+  //   ring.setColor(i, 174, 193, 85);
+  // }
+  for (int i = 0; i < N_LED; i++)
+  {
+    ring.setColor(i, 60, 100, 15);
+  }
+  ring.setBrightness(160);
+  ring.show();
+}
+
+unsigned int getDistanceInCM(unsigned short pin)
+{
+  unsigned int analogData = analogRead(pin);
+  float voltage = analogData * (3.3 / 4095.0);
+  float distanceInches = voltage / 0.0098f;      // 9.8mV per inch
+  return (unsigned int)(distanceInches * 2.54f); // inches to cm
+}
+
+unsigned int getDistanceFromPulseInCM(unsigned short pin)
+{
+  unsigned long duration = pulseIn(pin, HIGH);
+  if (duration == 0 || duration > 38000)
+    return 9999;                                 // timeout/no object guard
+  float distanceInches = duration / 147.0f;      // 147us per inch
+  return (unsigned int)(distanceInches * 2.54f); // inches to cm
+}
+
+void printArray(unsigned int *arr, uint8_t size)
+{
+  for (uint8_t i = 0; i < size; i++)
+  {
+    Serial.print(arr[i]);
+    Serial.print(" ");
+  }
+  Serial.println();
+}
+
+void loop()
+{
+  // Discard first reading - sensor may still be settling
+  getDistanceInCM(EZAnalogLeft);
+  getDistanceFromPulseInCM(EZPWM);
+  // getDistanceInCM(EZAnalogRight);
+  delay(100); // let sensor settle before real capture begins
+
+  for (uint8_t i = 0; i < sampleSize; i++)
+  {
+    delay(75);
+    radarSamplesLeft[i] = getDistanceFromPulseInCM(EZPWM);
+    // radarSamplesLeft[i] = getDistanceInCM(EZAnalogLeft);
+    // radarSamplesRight[i] = getDistanceInCM(EZAnalogRight);
+  }
+
+  isort(radarSamplesLeft, sampleSize);
+  // isort(radarSamplesRight, sampleSize);
+
+  unsigned int medLeft = mode(radarSamplesLeft, sampleSize);
+  Serial.println("radarSamplesLeft");
+  printArray(radarSamplesLeft, sampleSize);
+
+  unsigned int moreAccurateReading = 0;
+  // int16_t medRight = mode(radarSamplesRight, sampleSize);
+  readings[count++] = medLeft;
+  count %= num_avg_sample;
+
+  Serial.print("count = ");
+  Serial.println(count);
+  Serial.println("readings");
+  printArray(readings, num_avg_sample);
+
+  for (int i = 0; i < num_avg_sample; i++)
+    moreAccurateReading += readings[i];
+  moreAccurateReading /= num_avg_sample;
+
+  if (moreAccurateReading <= parking_threshold)
+  {
+    for (int i = 0; i < N_LED; i++)
+    {
+      ring.setColor(i, 0, 255, 0);
+    }
+    ring.setBrightness(160);
+    ring.show();
+  }
+  else
+  {
+    for (int i = 0; i < N_LED; i++)
+    {
+      ring.setColor(i, 255, 0, 0);
+    }
+    ring.setBrightness(160);
+    ring.show();
+  }
+
+  Serial.print("Median: ");
+  Serial.print(medLeft);
+  Serial.print(" Avg: ");
+  Serial.print(moreAccurateReading);
+  Serial.println();
+
+  led_on ^= 1;
+  digitalWrite(D1, led_on ? HIGH : LOW);
+  delay(1000);
+}
+
+// Sorting function (Author: Bill Gentles, Nov. 12, 2010)
+void isort(unsigned int *a, int8_t n)
+{
+  for (int i = 1; i < n; ++i)
+  {
+    unsigned int j = a[i];
+    int k;
+    for (k = i - 1; (k >= 0) && (j < a[k]); k--)
+    {
+      a[k + 1] = a[k];
+    }
+    a[k + 1] = j;
+  }
+}
+
+// Mode function, returning the mode or median.
+unsigned int mode(unsigned int *x, int n)
+{
+  int i = 0;
+  int count = 0;
+  int maxCount = 0;
+  unsigned int mode = 0;
+  int bimodal;
+  int prevCount = 0;
+  while (i < (n - 1))
+  {
+    prevCount = count;
+    count = 0;
+    while (x[i] == x[i + 1])
+    {
+      count++;
+      i++;
+    }
+    if (count > prevCount && count > maxCount)
+    {
+      mode = x[i];
+      maxCount = count;
+      bimodal = 0;
+    }
+    if (count == 0)
+    {
+      i++;
+    }
+    if (count == maxCount)
+    { // If the dataset has 2 or more modes.
+      bimodal = 1;
+    }
+    if (mode == 0 || bimodal == 1)
+    { // Return the median if there is no mode.
+      mode = x[(n / 2)];
+    }
+    return mode;
+  }
+  return 0;
+}
